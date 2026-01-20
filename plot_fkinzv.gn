@@ -1,0 +1,26 @@
+#!/usr/bin/gnuplot
+
+  set pm3d map
+
+  nz = 24*5    # Grid number in zz
+  im = 7       # Output im
+  dt_out = 0.1 # Time step for output
+  nt = 173    # Number of plot
+  nskip = 1   # Skip of plot
+
+
+do for[it=0:nt:nskip]{
+  input = sprintf('./data/fkinzv_im%04d_t%08d.dat', im, it)
+  set title 'Time t = '.sprintf('%7.2f', dt_out*it)
+  splot input binary record=(2*nz,-1) format='%double%double%double%double' u 1:2:($3**2+$4**2) ti ''
+  pause 0.1
+}
+pause -1
+
+#### for ASCII data
+#  splot input u 1:2:($3**2+$4**2) ti ''
+#### for BINARY data (ns=1)
+#  splot input binary record=(2*nz,-1) format='%double%double%double%double' u 1:2:($3**2+$4**2) ti ''
+#### for BINARY data (ns=2)
+#  splot input binary record=(2*nz,-1) format='%double%double%double%double'%double%double' u 1:2:($3**2+$4**2) ti ''
+

@@ -1,0 +1,21 @@
+#!/usr/bin/gnuplot
+
+  input = './data/frq.001'
+
+  set xlabel "Time"
+
+  set ylabel "Growthrate"
+  plot input u 1:2 ti '' w lp
+  pause -1
+  set ylabel "Frequency"
+  plot input u 1:3 ti '' w lp
+  pause -1
+
+  set yrange [*:*]
+  set logscale y
+  set format y "10^{%L}"
+  set ylabel "Diff(grow)"
+  plot input u 1:4 ti 'Diff(grow)' w lp, \
+       input u 1:5 ti 'Diff(freq)' w lp, \
+       input u 1:6 ti '1 - Ineq.' w lp
+  pause -1
