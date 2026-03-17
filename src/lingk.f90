@@ -476,9 +476,9 @@ SUBROUTINE initial_condition(time, fk, hk, pk, ak)
         end do
       end do
     end if
-    call random_number(rr)
-    call random_number(ri)
-    fk(:,:,:,:) = rr + ci * ri
+    !call random_number(rr)
+    !call random_number(ri)
+    !fk(:,:,:,:) = rr + ci * ri
 
     call fld_esfield(fk, pk)
     call fld_emfield_ff(fk, ak)

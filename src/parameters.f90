@@ -13,7 +13,7 @@ MODULE parameters
   complex(kind=DP), parameter :: ci = (0._DP, 1._DP)
 
 !- constants for numerical calculation -!
-  integer      , parameter :: litime = 1000000     ! Iteration limit of time
+  integer      , parameter :: litime = 1000     ! Iteration limit of time
   real(kind=DP), parameter :: elt_limit = 120._DP  ! Elapese time limit [sec]
   real(kind=DP), parameter :: time_limit = 10._DP  ! Simulation time limit
   integer      , parameter :: nz = 24*5            ! Grid number in zz direction
