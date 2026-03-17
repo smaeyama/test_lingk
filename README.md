@@ -1,41 +1,39 @@
 # lingk
 
-`lingk` is a linear gyrokinetic solver for a local flux-tube model.
-This repository contains the original Fortran implementation and plotting
-scripts for quick inspection with gnuplot.
+`lingk` は、局所フラックスチューブモデルにおける線形ジャイロ運動論方程式ソルバです。
+このリポジトリには、Fortran による本体実装と、gnuplot を用いた簡易可視化スクリプトが含まれています。
 
-## Repository layout
+## リポジトリ構成
 
-- `src/`: Fortran source files for the solver
-- `param.namelist`: runtime input parameters
-- `Makefile`: build rules for Intel Fortran (`ifx`) and an example GNU Fortran setup
-- `plot_*.gn`: gnuplot scripts for inspecting generated output files
+- `src/`: ソルバ本体の Fortran ソースコード
+- `param.namelist`: 実行時に読み込む入力パラメータ
+- `Makefile`: Intel Fortran (`ifx`) を既定としたビルドルール
+- `plot_*.gn`: 出力確認用の gnuplot スクリプト
 
-## Build
+## ビルド
 
-The default `Makefile` uses Intel Fortran:
+既定の `Makefile` では Intel Fortran を使います。
 
 ```bash
 make lingk
 ```
 
-This creates `lingk.exe`.
+これにより `lingk.exe` が生成されます。
 
-If you want to use GNU Fortran instead, switch the compiler settings in
-[`Makefile`](/home/smaeyama/github/test_lingk/Makefile) by uncommenting the
-`gfortran` block and disabling the `ifx` block.
+GNU Fortran を使いたい場合は、[`Makefile`](/home/smaeyama/github/test_lingk/Makefile) 内の
+`gfortran` 用設定を有効にし、`ifx` 用設定を無効にしてください。
 
-## Run
+## 実行
 
-The solver reads physics parameters from [`param.namelist`](/home/smaeyama/github/test_lingk/param.namelist)
-and writes outputs under `./data/`.
+ソルバは [`param.namelist`](/home/smaeyama/github/test_lingk/param.namelist) から物理パラメータを読み込み、
+出力を `./data/` 以下に書き出します。
 
 ```bash
 mkdir -p data
 ./lingk.exe
 ```
 
-The default sample input includes:
+付属のサンプル入力では、たとえば以下の値が設定されています。
 
 - `ky = 0.2`
 - `eps_r = 0.18`
@@ -44,18 +42,17 @@ The default sample input includes:
 - `R0_Ln = 2.2`
 - `R0_Lt = 6.9`
 
-## Output files
+## 出力ファイル
 
-With the default `flag_runs = 1`, the Fortran solver writes:
+既定の `flag_runs = 1` では、Fortran ソルバは次のファイルを出力します。
 
-- `data/frq.001`: linear growth rate and frequency history
-- `data/mominzt.001`: field and density moments as a function of `z` and time
-- `data/fkinzv_imXXXX_tYYYYYYYY.dat`: binary snapshots of the distribution
-  function for selected `mu` index
+- `data/frq.001`: 線形成長率と周波数の履歴
+- `data/mominzt.001`: `z` と時刻に対する場と密度モーメント
+- `data/fkinzv_imXXXX_tYYYYYYYY.dat`: 指定した `mu` インデックスにおける分布関数のバイナリ出力
 
-The main numerical parameters are defined in
-[`src/parameters.f90`](/home/smaeyama/github/test_lingk/src/parameters.f90),
-including:
+主要な数値パラメータは
+[`src/parameters.f90`](/home/smaeyama/github/test_lingk/src/parameters.f90)
+で定義されています。たとえば以下のような値です。
 
 - `nz = 24 * 5`
 - `nv = 32`
@@ -63,9 +60,9 @@ including:
 - `dt_out = 0.1`
 - `time_limit = 10.0`
 
-## Quick visualization
+## 可視化
 
-If gnuplot is available, the bundled scripts can be used directly:
+gnuplot が使える環境であれば、付属スクリプトで簡単に出力を確認できます。
 
 ```bash
 gnuplot plot_linfreq.gn
@@ -73,4 +70,4 @@ gnuplot plot_mominz.gn
 gnuplot plot_fkinzv.gn
 ```
 
-These scripts expect the default Fortran outputs in `./data/`.
+これらのスクリプトは、既定の Fortran 出力が `./data/` にあることを前提としています。
