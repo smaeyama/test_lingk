@@ -1,5 +1,4 @@
 #!/usr/bin/env python
-# coding: utf-8
 
 """Compare Fortran and Python linear gyrokinetic outputs."""
 
@@ -8,8 +7,8 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-import h5py
 import numpy as np
+import xarray as xr
 
 
 FRQ_COLUMNS = (
@@ -41,6 +40,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fortran-mominzt", default="../data/mominzt.001")
     parser.add_argument("--python-fkinzv", default="lingk_output/fkinzv.nc")
     parser.add_argument("--fortran-fkinzv-dir", default="../data")
+    parser.add_argument("--max-abs", type=float, default=1.0e-5)
+    parser.add_argument("--max-rel-rms", type=float, default=1.0e-6)
+    parser.add_argument("--assert-match", action="store_true")
     return parser.parse_args()
 
 
@@ -64,15 +66,6 @@ def relative_rms(error: np.ndarray, reference: np.ndarray) -> float:
     return rms(error) / denom
 
 
-def main() -> None:
-    args = parse_args()
-    compare_frq(Path(args.python_frq), Path(args.fortran_frq))
-    print("")
-    compare_mominzt(Path(args.python_mominzt), Path(args.fortran_mominzt))
-    print("")
-    compare_fkinzv(Path(args.python_fkinzv), Path(args.fortran_fkinzv_dir))
-
-
 def print_metric_table(title: str, metrics: list[tuple[str, float, float, float]], context: list[str]) -> None:
     print(title)
     for line in context:
@@ -94,7 +87,7 @@ def compare_arrays(names: tuple[str, ...], py_data: np.ndarray, ft_data: np.ndar
     return metrics
 
 
-def compare_frq(py_path: Path, ft_path: Path) -> None:
+def compare_frq(py_path: Path, ft_path: Path) -> list[tuple[str, float, float, float]]:
     py_data = load_frq(py_path)
     ft_data = load_frq(ft_path)
     nrows = min(len(py_data), len(ft_data))
@@ -109,13 +102,14 @@ def compare_frq(py_path: Path, ft_path: Path) -> None:
     if len(py_data) != len(ft_data):
         context.append(f"[warn] row count differs: python={len(py_data)}, fortran={len(ft_data)}")
     print_metric_table("FRQ Comparison", metrics, context)
+    return metrics
 
 
-def load_hdf5_dataset(path: Path, names: tuple[str, ...]) -> dict[str, np.ndarray]:
+def load_xarray_dataset(path: Path, names: tuple[str, ...]) -> dict[str, np.ndarray]:
     out: dict[str, np.ndarray] = {}
-    with h5py.File(path, "r") as f:
+    with xr.open_dataset(path) as f:
         for name in names:
-            out[name] = f[name][()]
+            out[name] = f[name].values
     return out
 
 
@@ -138,8 +132,8 @@ def load_fortran_mominzt(path: Path) -> dict[str, np.ndarray]:
     return {name: arr[..., i] for i, name in enumerate(MOMINZT_COLUMNS)}
 
 
-def compare_mominzt(py_path: Path, ft_path: Path) -> None:
-    py = load_hdf5_dataset(py_path, ("time", "z", "phi_real", "phi_imag", "A_real", "A_imag", "dens_real", "dens_imag"))
+def compare_mominzt(py_path: Path, ft_path: Path) -> list[tuple[str, float, float, float]]:
+    py = load_xarray_dataset(py_path, ("time", "z", "phi_real", "phi_imag", "A_real", "A_imag", "dens_real", "dens_imag"))
     ft = load_fortran_mominzt(ft_path)
 
     nt = min(py["time"].shape[0], ft["time"].shape[0])
@@ -182,6 +176,7 @@ def compare_mominzt(py_path: Path, ft_path: Path) -> None:
             f"z points compared: {nz}",
         ],
     )
+    return metrics
 
 
 def load_fortran_fkinzv(path: Path, nz: int, nv: int) -> dict[str, np.ndarray]:
@@ -195,8 +190,8 @@ def load_fortran_fkinzv(path: Path, nz: int, nv: int) -> dict[str, np.ndarray]:
     }
 
 
-def compare_fkinzv(py_path: Path, ft_dir: Path) -> None:
-    py = load_hdf5_dataset(py_path, ("time", "z", "vl", "mu_index", "f_real", "f_imag"))
+def compare_fkinzv(py_path: Path, ft_dir: Path) -> list[tuple[str, float, float, float]]:
+    py = load_xarray_dataset(py_path, ("time", "z", "vl", "mu_index", "f_real", "f_imag"))
     nz = py["z"].shape[0]
     nv = py["vl"].shape[0]
 
@@ -235,6 +230,30 @@ def compare_fkinzv(py_path: Path, ft_dir: Path) -> None:
             f"grid compared: nz={nz}, nv={nv}",
         ],
     )
+    return metrics
+
+
+def assert_metrics(metrics: list[tuple[str, float, float, float]], max_abs: float, max_rel_rms: float) -> None:
+    failures: list[str] = []
+    for name, max_err, _rms_err, rel_rms_err in metrics:
+        if max_err > max_abs:
+            failures.append(f"{name}: max_abs={max_err:.7e} exceeds {max_abs:.7e}")
+        if np.isfinite(rel_rms_err) and rel_rms_err > max_rel_rms:
+            failures.append(f"{name}: relative_rms={rel_rms_err:.7e} exceeds {max_rel_rms:.7e}")
+    if failures:
+        raise SystemExit("Comparison thresholds failed:\n" + "\n".join(failures))
+
+
+def main() -> None:
+    args = parse_args()
+    metrics: list[tuple[str, float, float, float]] = []
+    metrics.extend(compare_frq(Path(args.python_frq), Path(args.fortran_frq)))
+    print("")
+    metrics.extend(compare_mominzt(Path(args.python_mominzt), Path(args.fortran_mominzt)))
+    print("")
+    metrics.extend(compare_fkinzv(Path(args.python_fkinzv), Path(args.fortran_fkinzv_dir)))
+    if args.assert_match:
+        assert_metrics(metrics, max_abs=args.max_abs, max_rel_rms=args.max_rel_rms)
 
 
 if __name__ == "__main__":

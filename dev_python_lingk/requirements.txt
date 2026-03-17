@@ -1,0 +1,7 @@
+jax
+matplotlib
+numpy
+pytest
+scipy
+tqdm
+xarray
