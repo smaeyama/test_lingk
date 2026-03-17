@@ -1,4 +1,7 @@
-h5py
+jax
+matplotlib
 numpy
+pytest
 scipy
 tqdm
+xarray

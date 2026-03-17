@@ -7,8 +7,8 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-import h5py
 import numpy as np
+import xarray as xr
 
 
 FRQ_COLUMNS = (
@@ -105,11 +105,11 @@ def compare_frq(py_path: Path, ft_path: Path) -> list[tuple[str, float, float, f
     return metrics
 
 
-def load_hdf5_dataset(path: Path, names: tuple[str, ...]) -> dict[str, np.ndarray]:
+def load_xarray_dataset(path: Path, names: tuple[str, ...]) -> dict[str, np.ndarray]:
     out: dict[str, np.ndarray] = {}
-    with h5py.File(path, "r") as f:
+    with xr.open_dataset(path) as f:
         for name in names:
-            out[name] = f[name][()]
+            out[name] = f[name].values
     return out
 
 
@@ -133,7 +133,7 @@ def load_fortran_mominzt(path: Path) -> dict[str, np.ndarray]:
 
 
 def compare_mominzt(py_path: Path, ft_path: Path) -> list[tuple[str, float, float, float]]:
-    py = load_hdf5_dataset(py_path, ("time", "z", "phi_real", "phi_imag", "A_real", "A_imag", "dens_real", "dens_imag"))
+    py = load_xarray_dataset(py_path, ("time", "z", "phi_real", "phi_imag", "A_real", "A_imag", "dens_real", "dens_imag"))
     ft = load_fortran_mominzt(ft_path)
 
     nt = min(py["time"].shape[0], ft["time"].shape[0])
@@ -191,7 +191,7 @@ def load_fortran_fkinzv(path: Path, nz: int, nv: int) -> dict[str, np.ndarray]:
 
 
 def compare_fkinzv(py_path: Path, ft_dir: Path) -> list[tuple[str, float, float, float]]:
-    py = load_hdf5_dataset(py_path, ("time", "z", "vl", "mu_index", "f_real", "f_imag"))
+    py = load_xarray_dataset(py_path, ("time", "z", "vl", "mu_index", "f_real", "f_imag"))
     nz = py["z"].shape[0]
     nv = py["vl"].shape[0]
 

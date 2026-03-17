@@ -10,10 +10,23 @@ from pathlib import Path
 from time import perf_counter
 from typing import Any
 
-import h5py
 import numpy as np
 from scipy.special import i0, j0
 from tqdm import tqdm
+import xarray as xr
+
+try:
+    from jax import config as jax_config
+
+    jax_config.update("jax_enable_x64", True)
+    import jax
+    import jax.numpy as jnp
+
+    JAX_AVAILABLE = True
+except Exception:
+    jax = None
+    jnp = None
+    JAX_AVAILABLE = False
 
 
 PI = np.pi
@@ -342,6 +355,210 @@ def ff_to_hh(fk: np.ndarray, ak: np.ndarray, geom: GKGeometry) -> np.ndarray:
     return fk + correction
 
 
+def build_jax_geometry(geom: GKGeometry) -> dict[str, Any]:
+    if not JAX_AVAILABLE:
+        raise RuntimeError("JAX is not available")
+
+    nvb = geom.params.nvb
+    vsize = geom.nv_tot + 2 * nvb
+    pos_mask = np.zeros(vsize, dtype=bool)
+    neg_mask = np.zeros(vsize, dtype=bool)
+    pos_mask[nvb : nvb + geom.nv_tot] = geom.vl > 0.0
+    neg_mask[nvb : nvb + geom.nv_tot] = geom.vl <= 0.0
+
+    return {
+        "nzb": geom.params.nzb,
+        "nvb": geom.params.nvb,
+        "nz_tot": geom.nz_tot,
+        "nv_tot": geom.nv_tot,
+        "nm_tot": geom.nm_tot,
+        "ns": geom.params.ns,
+        "dv": geom.dv,
+        "dpara": jnp.asarray(geom.dpara),
+        "dvp": jnp.asarray(geom.dvp),
+        "vl": jnp.asarray(geom.vl),
+        "vp": jnp.asarray(geom.vp),
+        "mir": jnp.asarray(geom.mir),
+        "ksq": jnp.asarray(geom.ksq),
+        "omg": jnp.asarray(geom.omg),
+        "fmx": jnp.asarray(geom.fmx),
+        "j0": jnp.asarray(geom.j0),
+        "g0": jnp.asarray(geom.g0),
+        "kvd": jnp.asarray(geom.kvd),
+        "kvs": jnp.asarray(geom.kvs),
+        "fct_poisson": jnp.asarray(geom.fct_poisson),
+        "fct_ampere": jnp.asarray(geom.fct_ampere),
+        "sgn": jnp.asarray(geom.params.sgn),
+        "fcs": jnp.asarray(geom.params.fcs),
+        "tau": jnp.asarray(geom.params.tau),
+        "Anum": jnp.asarray(geom.params.Anum),
+        "Znum": jnp.asarray(geom.params.Znum),
+        "beta": geom.params.beta,
+        "pos_mask": jnp.asarray(pos_mask[None, :, None, None]),
+        "neg_mask": jnp.asarray(neg_mask[None, :, None, None]),
+    }
+
+
+def _vintegral_species_jax(wf: Any, geom_jax: dict[str, Any]) -> Any:
+    wn = jnp.sum(wf[:, :, 1:-1, :] * geom_jax["vp"][:, None, 1:-1, None], axis=(1, 2))
+    wn = wn * (2.0 * PI * geom_jax["dv"] * geom_jax["dvp"][:, None])
+    wfvp = wf[:, :, 1, :] * geom_jax["vp"][:, None, 1, None]
+    wfvp1 = wf[:, :, 2, :] * geom_jax["vp"][:, None, 2, None]
+    corr = (-wfvp / 12.0 + (wfvp1 - 2.0 * wfvp) * 11.0 / 720.0)
+    corr = corr * (2.0 * PI * geom_jax["dv"] * geom_jax["dvp"][:, None, None])
+    return wn - jnp.sum(corr, axis=1)
+
+
+def _solve_electrostatic_field_jax(fk: Any, geom_jax: dict[str, Any]) -> Any:
+    wf = fk * geom_jax["j0"][:, None, :, :] * geom_jax["sgn"][None, None, None, :] * geom_jax["fcs"][None, None, None, :]
+    nk = jnp.sum(_vintegral_species_jax(wf, geom_jax), axis=1)
+    if geom_jax["ns"] == 1:
+        return nk / ((1.0 - geom_jax["g0"][:, 0]) / geom_jax["tau"][0] + 1.0)
+    return nk * geom_jax["fct_poisson"]
+
+
+def _solve_magnetic_field_from_h_jax(hk: Any, geom_jax: dict[str, Any]) -> Any:
+    coeff = geom_jax["sgn"] * geom_jax["fcs"] * jnp.sqrt(geom_jax["tau"] / geom_jax["Anum"])
+    wf = hk * geom_jax["j0"][:, None, :, :] * geom_jax["vl"][None, :, None, None] * coeff[None, None, None, :]
+    nk = jnp.sum(_vintegral_species_jax(wf, geom_jax), axis=1)
+    return nk * geom_jax["beta"] * geom_jax["fct_ampere"]
+
+
+def _hh_to_ff_jax(hk: Any, ak: Any, geom_jax: dict[str, Any]) -> Any:
+    coeff = geom_jax["sgn"] * geom_jax["Znum"] / jnp.sqrt(geom_jax["Anum"] * geom_jax["tau"])
+    correction = (
+        coeff[None, None, None, :]
+        * geom_jax["fmx"][:, :, :, None]
+        * geom_jax["vl"][None, :, None, None]
+        * geom_jax["j0"][:, None, :, :]
+        * ak[:, None, None, None]
+    )
+    return hk - correction
+
+
+def _state_fields_from_h_jax(hk: Any, geom_jax: dict[str, Any]) -> tuple[Any, Any, Any]:
+    ak = _solve_magnetic_field_from_h_jax(hk, geom_jax)
+    fk = _hh_to_ff_jax(hk, ak, geom_jax)
+    pk = _solve_electrostatic_field_jax(fk, geom_jax)
+    return fk, pk, ak
+
+
+def _extend_distribution_jax(field: Any, geom_jax: dict[str, Any]) -> Any:
+    base = jnp.pad(
+        field,
+        ((0, 0), (geom_jax["nvb"], geom_jax["nvb"]), (geom_jax["nvb"], geom_jax["nvb"]), (0, 0)),
+        mode="constant",
+    )
+    upper_1 = jnp.where(geom_jax["pos_mask"], base[-1:, :, :, :], 0.0)
+    upper_2 = jnp.where(geom_jax["pos_mask"], -base[-2:-1, :, :, :] + 2.0 * base[-1:, :, :, :], 0.0)
+    lower_1 = jnp.where(geom_jax["neg_mask"], base[:1, :, :, :], 0.0)
+    lower_2 = jnp.where(geom_jax["neg_mask"], -base[1:2, :, :, :] + 2.0 * base[:1, :, :, :], 0.0)
+    return jnp.concatenate((lower_2, lower_1, base, upper_1, upper_2), axis=0)
+
+
+def _extend_field_zero_z_jax(field: Any, geom_jax: dict[str, Any]) -> Any:
+    zeros = jnp.zeros((geom_jax["nzb"], field.shape[1], field.shape[2]), dtype=field.dtype)
+    return jnp.concatenate((zeros, field, zeros), axis=0)
+
+
+def _rhs_h_jax(hk: Any, geom_jax: dict[str, Any]) -> Any:
+    fk, pk, ak = _state_fields_from_h_jax(hk, geom_jax)
+    ff_ext = _extend_distribution_jax(fk, geom_jax)
+    z0 = geom_jax["nzb"]
+    v0 = geom_jax["nvb"]
+    m0 = geom_jax["nvb"]
+
+    psi = geom_jax["j0"] * pk[:, None, None]
+    chi = geom_jax["j0"] * ak[:, None, None]
+    psi_ext = _extend_field_zero_z_jax(psi, geom_jax)
+
+    dh_terms = []
+    for ispec in range(geom_jax["ns"]):
+        cs1 = geom_jax["sgn"][ispec] * geom_jax["Znum"][ispec] / geom_jax["tau"][ispec]
+        cs2 = jnp.sqrt(geom_jax["tau"][ispec] / geom_jax["Anum"][ispec])
+
+        dh_ispec = (
+            -CI * geom_jax["kvd"][..., ispec] * fk[..., ispec]
+            - cs1
+            * geom_jax["fmx"]
+            * (
+                CI * geom_jax["kvd"][..., ispec] * psi[:, :, ispec][:, None, :]
+                - CI * geom_jax["kvs"][..., ispec]
+                * (psi[:, :, ispec][:, None, :] - cs2 * geom_jax["vl"][None, :, None] * chi[:, :, ispec][:, None, :])
+            )
+        )
+
+        dfdz = (
+            -ff_ext[z0 + 2 : z0 + 2 + geom_jax["nz_tot"], v0 : v0 + geom_jax["nv_tot"], m0 : m0 + geom_jax["nm_tot"], ispec]
+            + 8.0 * ff_ext[z0 + 1 : z0 + 1 + geom_jax["nz_tot"], v0 : v0 + geom_jax["nv_tot"], m0 : m0 + geom_jax["nm_tot"], ispec]
+            - 8.0 * ff_ext[z0 - 1 : z0 - 1 + geom_jax["nz_tot"], v0 : v0 + geom_jax["nv_tot"], m0 : m0 + geom_jax["nm_tot"], ispec]
+            + ff_ext[z0 - 2 : z0 - 2 + geom_jax["nz_tot"], v0 : v0 + geom_jax["nv_tot"], m0 : m0 + geom_jax["nm_tot"], ispec]
+        ) / (12.0 * geom_jax["dpara"][:, None, None])
+        dfdv = (
+            -ff_ext[z0 : z0 + geom_jax["nz_tot"], v0 + 2 : v0 + 2 + geom_jax["nv_tot"], m0 : m0 + geom_jax["nm_tot"], ispec]
+            + 8.0 * ff_ext[z0 : z0 + geom_jax["nz_tot"], v0 + 1 : v0 + 1 + geom_jax["nv_tot"], m0 : m0 + geom_jax["nm_tot"], ispec]
+            - 8.0 * ff_ext[z0 : z0 + geom_jax["nz_tot"], v0 - 1 : v0 - 1 + geom_jax["nv_tot"], m0 : m0 + geom_jax["nm_tot"], ispec]
+            + ff_ext[z0 : z0 + geom_jax["nz_tot"], v0 - 2 : v0 - 2 + geom_jax["nv_tot"], m0 : m0 + geom_jax["nm_tot"], ispec]
+        ) / (12.0 * geom_jax["dv"])
+        dpsidz = (
+            -psi_ext[z0 + 2 : z0 + 2 + geom_jax["nz_tot"], :, ispec]
+            + 8.0 * psi_ext[z0 + 1 : z0 + 1 + geom_jax["nz_tot"], :, ispec]
+            - 8.0 * psi_ext[z0 - 1 : z0 - 1 + geom_jax["nz_tot"], :, ispec]
+            + psi_ext[z0 - 2 : z0 - 2 + geom_jax["nz_tot"], :, ispec]
+        ) / (12.0 * geom_jax["dpara"][:, None])
+
+        dh_ispec = dh_ispec - geom_jax["vl"][None, :, None] * cs2 * dfdz
+        dh_ispec = dh_ispec + geom_jax["mir"][:, None, :] * cs2 * dfdv
+        dh_ispec = dh_ispec - cs1 * geom_jax["fmx"] * geom_jax["vl"][None, :, None] * cs2 * dpsidz[:, None, :]
+        dh_terms.append(dh_ispec)
+
+    return jnp.stack(dh_terms, axis=-1)
+
+
+def _rkg_step_jax(hk: Any, q: Any, dt: float, geom_jax: dict[str, Any]) -> tuple[Any, Any, Any, Any, Any]:
+    hk_work = hk
+
+    dh = _rhs_h_jax(hk_work, geom_jax)
+    k = dt * dh
+    r = 0.5 * (k[:, :, :-1, :] - 2.0 * q[:, :, :-1, :])
+    hk_work = hk_work.at[:, :, :-1, :].add(r)
+    q = q.at[:, :, :-1, :].add(3.0 * r - 0.5 * k[:, :, :-1, :])
+
+    dh = _rhs_h_jax(hk_work, geom_jax)
+    k = dt * dh
+    factor = 1.0 - jnp.sqrt(0.5)
+    r = factor * (k[:, :, :-1, :] - q[:, :, :-1, :])
+    hk_work = hk_work.at[:, :, :-1, :].add(r)
+    q = q.at[:, :, :-1, :].add(3.0 * r - factor * k[:, :, :-1, :])
+
+    dh = _rhs_h_jax(hk_work, geom_jax)
+    k = dt * dh
+    factor = 1.0 + jnp.sqrt(0.5)
+    r = factor * (k[:, :, :-1, :] - q[:, :, :-1, :])
+    hk_work = hk_work.at[:, :, :-1, :].add(r)
+    q = q.at[:, :, :-1, :].add(3.0 * r - factor * k[:, :, :-1, :])
+
+    dh = _rhs_h_jax(hk_work, geom_jax)
+    k = dt * dh
+    r = (k[:, :, :-1, :] - 2.0 * q[:, :, :-1, :]) / 6.0
+    hk_work = hk_work.at[:, :, :-1, :].add(r)
+    q = q.at[:, :, :-1, :].add(3.0 * r - 0.5 * k[:, :, :-1, :])
+
+    fk, pk, ak = _state_fields_from_h_jax(hk_work, geom_jax)
+    return hk_work, q, fk, pk, ak
+
+
+def _rkg_n_steps_jax(hk: Any, q: Any, dt: float, nsteps: int, geom_jax: dict[str, Any]) -> tuple[Any, Any, Any, Any, Any]:
+    def body(_index: int, carry: tuple[Any, Any]):
+        hk_work, q_work = carry
+        hk_work, q_work, _fk, _pk, _ak = _rkg_step_jax(hk_work, q_work, dt, geom_jax)
+        return hk_work, q_work
+
+    hk_final, q_final = jax.lax.fori_loop(0, nsteps, body, (hk, q))
+    fk, pk, ak = _state_fields_from_h_jax(hk_final, geom_jax)
+    return hk_final, q_final, fk, pk, ak
+
+
 def state_fields_from_h(hk: np.ndarray, geom: GKGeometry) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     ak = solve_magnetic_field_from_h(hk, geom)
     fk = hh_to_ff(hk, ak, geom)
@@ -544,6 +761,16 @@ class RungeKuttaGillStepper:
     def __init__(self, geom: GKGeometry):
         self.geom = geom
         self.q = np.zeros((geom.nz_tot, geom.nv_tot, geom.nm_tot, geom.params.ns), dtype=np.complex128)
+        self.use_jax = JAX_AVAILABLE and np.allclose(geom.params.nu, 0.0)
+        if self.use_jax:
+            self.q = jnp.asarray(self.q)
+            self.geom_jax = build_jax_geometry(geom)
+            self._compiled_step = jax.jit(lambda hk, q, dt: _rkg_step_jax(hk, q, dt, self.geom_jax))
+            self._compiled_step_many = jax.jit(lambda hk, q, dt, nsteps: _rkg_n_steps_jax(hk, q, dt, nsteps, self.geom_jax))
+        else:
+            self.geom_jax = None
+            self._compiled_step = None
+            self._compiled_step_many = None
 
     def _update_active_mu(self, hk: np.ndarray, k: np.ndarray, factor: float, q_factor: float) -> np.ndarray:
         r = factor * (k[:, :, :-1, :] - q_factor * self.q[:, :, :-1, :])
@@ -551,6 +778,11 @@ class RungeKuttaGillStepper:
         return r
 
     def step(self, hk: np.ndarray, dt: float) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        if self._compiled_step is not None:
+            hk_work, q, fk, pk, ak = self._compiled_step(jnp.asarray(hk), self.q, dt)
+            self.q = q
+            return hk_work, fk, pk, ak
+
         hk_work = hk.copy()
 
         fk, pk, ak = state_fields_from_h(hk_work, self.geom)
@@ -580,6 +812,23 @@ class RungeKuttaGillStepper:
         self.q[:, :, :-1, :] += 3.0 * r - 0.5 * k[:, :, :-1, :]
 
         fk, pk, ak = state_fields_from_h(hk_work, self.geom)
+        return hk_work, fk, pk, ak
+
+    def step_many(self, hk: np.ndarray, dt: float, nsteps: int) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        if nsteps <= 0:
+            fk, pk, ak = state_fields_from_h(hk, self.geom)
+            return hk, fk, pk, ak
+
+        if self._compiled_step_many is not None:
+            hk_work, q, fk, pk, ak = self._compiled_step_many(jnp.asarray(hk), self.q, dt, nsteps)
+            self.q = q
+            return hk_work, fk, pk, ak
+
+        hk_work = hk
+        fk = pk = ak = None
+        for _ in range(nsteps):
+            hk_work, fk, pk, ak = self.step(hk_work, dt)
+        assert fk is not None and pk is not None and ak is not None
         return hk_work, fk, pk, ak
 
 
@@ -702,28 +951,42 @@ def linfreq_rows(times: np.ndarray, pk_series: np.ndarray, dt_out: float, kx: fl
 def write_fkinzv(path: Path, times: np.ndarray, mu_idx: np.ndarray, geom: GKGeometry, params: GKParameters, series: np.ndarray) -> None:
     f_real = np.real(series)
     f_imag = np.imag(series)
-    with h5py.File(path, "w") as f:
-        f.create_dataset("time", data=times)
-        f.create_dataset("mu_index", data=mu_idx)
-        f.create_dataset("mu", data=geom.mu[mu_idx])
-        f.create_dataset("z", data=geom.zz)
-        f.create_dataset("vl", data=geom.vl)
-        f.create_dataset("species", data=np.arange(params.ns))
-        f.create_dataset("f_real", data=np.transpose(f_real, (0, 3, 1, 2, 4)))
-        f.create_dataset("f_imag", data=np.transpose(f_imag, (0, 3, 1, 2, 4)))
+    ds = xr.Dataset(
+        data_vars={
+            "f_real": (("time", "mu_index", "z", "vl", "species"), np.transpose(f_real, (0, 3, 1, 2, 4))),
+            "f_imag": (("time", "mu_index", "z", "vl", "species"), np.transpose(f_imag, (0, 3, 1, 2, 4))),
+        },
+        coords={
+            "time": times,
+            "mu_index": mu_idx,
+            "mu": ("mu_index", geom.mu[mu_idx]),
+            "z": geom.zz,
+            "vl": geom.vl,
+            "species": np.arange(params.ns),
+        },
+    )
+    ds.to_netcdf(path)
+    ds.close()
 
 
 def write_mominz(path: Path, times: np.ndarray, geom: GKGeometry, params: GKParameters, phi: np.ndarray, a: np.ndarray, dens: np.ndarray) -> None:
-    with h5py.File(path, "w") as f:
-        f.create_dataset("time", data=times)
-        f.create_dataset("z", data=geom.zz)
-        f.create_dataset("species", data=np.arange(params.ns))
-        f.create_dataset("phi_real", data=np.real(phi))
-        f.create_dataset("phi_imag", data=np.imag(phi))
-        f.create_dataset("A_real", data=np.real(a))
-        f.create_dataset("A_imag", data=np.imag(a))
-        f.create_dataset("dens_real", data=np.real(dens))
-        f.create_dataset("dens_imag", data=np.imag(dens))
+    ds = xr.Dataset(
+        data_vars={
+            "phi_real": (("time", "z"), np.real(phi)),
+            "phi_imag": (("time", "z"), np.imag(phi)),
+            "A_real": (("time", "z"), np.real(a)),
+            "A_imag": (("time", "z"), np.imag(a)),
+            "dens_real": (("time", "z", "species"), np.real(dens)),
+            "dens_imag": (("time", "z", "species"), np.imag(dens)),
+        },
+        coords={
+            "time": times,
+            "z": geom.zz,
+            "species": np.arange(params.ns),
+        },
+    )
+    ds.to_netcdf(path)
+    ds.close()
 
 
 def main() -> None:
@@ -769,41 +1032,55 @@ def main() -> None:
     time_out = time + params.dt_out - EPS
 
     def record_state(current_time: float, current_fk: np.ndarray, current_pk: np.ndarray, current_ak: np.ndarray) -> None:
-        density = np.stack([vintegral_z(current_fk[:, :, :, ispec], geom) for ispec in range(params.ns)], axis=-1)
+        fk_np = np.asarray(current_fk)
+        pk_np = np.asarray(current_pk)
+        ak_np = np.asarray(current_ak)
+        density = np.stack([vintegral_z(fk_np[:, :, :, ispec], geom) for ispec in range(params.ns)], axis=-1)
         fkinzv_times.append(current_time)
-        fkinzv_series.append(current_fk[:, :, selected_mu, :])
+        fkinzv_series.append(fk_np[:, :, selected_mu, :])
         mominz_times.append(current_time)
-        phi_series.append(current_pk.copy())
-        a_series.append(current_ak.copy())
+        phi_series.append(pk_np.copy())
+        a_series.append(ak_np.copy())
         dens_series.append(density)
-        pk_for_freq.append(current_pk.copy())
+        pk_for_freq.append(pk_np.copy())
 
     sample_start = perf_counter()
     record_state(time, fk, pk, ak)
     sample_elapsed += perf_counter() - sample_start
 
-    iterator = range(args.max_steps + 1)
+    total_steps = args.max_steps + 1
+    progress = None
     if not args.disable_progress:
-        iterator = tqdm(iterator, desc="lingk-reference", unit="step")
+        progress = tqdm(total=total_steps, desc="lingk-reference", unit="step")
 
-    for istep in iterator:
+    istep = 0
+    while istep < total_steps:
         if time > params.time_limit:
             break
 
+        max_steps_until_limit = int(np.floor((params.time_limit - time) / params.dt + 1.0e-12)) + 1
+        next_output_step = int(np.floor(time_out / params.dt + 1.0e-12)) + 1
+        steps_until_output = max(1, next_output_step - istep)
+        batch_steps = min(total_steps - istep, max_steps_until_limit, steps_until_output)
+
         rkg_start = perf_counter()
-        hk, fk, pk, ak = stepper.step(hk, params.dt)
+        hk, fk, pk, ak = stepper.step_many(hk, params.dt, batch_steps)
         rkg_elapsed += perf_counter() - rkg_start
-        time += params.dt
+        istep += batch_steps
+        time += params.dt * batch_steps
 
-        if not args.disable_progress:
-            assert isinstance(iterator, tqdm)
-            iterator.set_postfix(step=istep + 1, time=f"{time:.3f}", next_out=f"{time_out + EPS:.3f}")
+        if progress is not None:
+            progress.update(batch_steps)
+            progress.set_postfix(step=istep, time=f"{time:.3f}", next_out=f"{time_out + EPS:.3f}")
 
-        if time > time_out:
+        while time > time_out:
             sample_start = perf_counter()
             record_state(time, fk, pk, ak)
             sample_elapsed += perf_counter() - sample_start
             time_out += params.dt_out
+
+    if progress is not None:
+        progress.close()
 
     fkinzv_arr = np.stack(fkinzv_series, axis=0)
     phi_arr = np.stack(phi_series, axis=0)

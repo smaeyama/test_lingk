@@ -18,7 +18,14 @@ def ensure_fortran_binary() -> None:
     exe = ROOT / "lingk.exe"
     if exe.exists():
         return
-    run(["make", "lingk"], cwd=ROOT)
+    try:
+        run(["make", "lingk"], cwd=ROOT)
+    except subprocess.CalledProcessError as exc:
+        if have_fortran_reference_outputs():
+            return
+        stderr = getattr(exc, "stderr", None)
+        reason = stderr.decode() if isinstance(stderr, bytes) else str(stderr or exc)
+        pytest.skip(f"Fortran executable could not be built and no reference outputs are available: {reason}")
 
 
 def have_fortran_reference_outputs() -> bool:
@@ -33,7 +40,7 @@ def refresh_fortran_outputs_if_possible() -> None:
     (ROOT / "data").mkdir(exist_ok=True)
     try:
         run(["./lingk.exe"], cwd=ROOT)
-    except subprocess.CalledProcessError as exc:
+    except (subprocess.CalledProcessError, FileNotFoundError) as exc:
         if have_fortran_reference_outputs():
             return
         stderr = getattr(exc, "stderr", None)
@@ -55,8 +62,8 @@ def test_fortran_and_python_outputs_match(tmp_path: Path) -> None:
             "--output-dir",
             str(output_dir),
             "--disable-progress",
-            "--time-limit",
-            "0.5",
+            "--max-steps",
+            "100",
         ],
         cwd=ROOT,
     )
