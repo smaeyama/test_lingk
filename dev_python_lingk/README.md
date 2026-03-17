@@ -1,7 +1,7 @@
 # dev_python_lingk
 
-`dev_python_lingk/` は、`lingk` の Python 参照実装と、その出力確認・可視化用スクリプトをまとめた作業用ディレクトリです。
-リポジトリ全体としては Fortran 版が主ですが、このディレクトリでは Python 版を独立に扱えるようにしています。
+`dev_python_lingk/` は、`lingk` の Python 実装テストと、その出力確認・可視化用スクリプトをまとめた作業用ディレクトリです。
+（Codexを用いて半自動的に作成したため完全には保証しかねますが、Fortran版と出力比較を行った限りではひとまず悪くなさそうです。）
 
 ## ファイル構成
 
@@ -14,14 +14,6 @@
 - `requirements.txt`: Python 側で使う主な依存パッケージ
 
 ## 実行例
-
-リポジトリルートで Python 版を実行する場合:
-
-```bash
-python3 dev_python_lingk/lingk.py --param-namelist param.namelist
-```
-
-`dev_python_lingk/` に移動して実行する場合:
 
 ```bash
 cd dev_python_lingk
@@ -68,10 +60,9 @@ python3 dev_python_lingk/check_fortran_vs_python.py --assert-match
 
 ## テスト
 
-`dev_python_lingk/` に移動して `pytest` を実行すると、`test/` 配下の比較テストが走ります。
+`dev_python_lingk/` にいる場合、`pytest` を実行すると、`test/` 配下の比較テストが走ります。
 
 ```bash
-cd dev_python_lingk
 pytest
 ```
 
